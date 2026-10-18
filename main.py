@@ -29,6 +29,17 @@ from PySide6.QtWidgets import (
     QMenu,
     QLineEdit,
 )
+import builtins
+import keyword
+
+from PySide6.QtCore import QStringListModel, QRegularExpression
+from PySide6.QtGui import (
+    QColor,
+    QTextCharFormat,
+    QSyntaxHighlighter,
+    QTextCursor,
+)
+from PySide6.QtWidgets import QCompleter
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 TEXT_EXTENSIONS = {
@@ -62,6 +73,170 @@ class Sprite:
         # Called when this sprite collides with another sprite.
         pass
 """
+
+
+class PythonHighlighter(QSyntaxHighlighter):
+    def __init__(self, document):
+        super().__init__(document)
+
+        self.rules = []
+
+        def add_rule(pattern, color, bold=False, italic=False):
+            fmt = QTextCharFormat()
+            fmt.setForeground(QColor(color))
+            if bold:
+                fmt.setFontWeight(QFont.Weight.Bold)
+            if italic:
+                fmt.setFontItalic(True)
+
+            self.rules.append((QRegularExpression(pattern), fmt))
+
+        add_rule(
+            r"\b(" + "|".join(keyword.kwlist) + r")\b",
+            "#569CD6", True
+        )
+        add_rule(
+            r"\b(" + "|".join(dir(builtins)) + r")\b",
+            "#DCDCAA"
+        )
+        add_rule(r"\b\d+(\.\d+)?\b", "#B5CEA8")
+        add_rule(r"#.*$", "#6A9955", italic=True)
+        add_rule(
+            r"\bdef\s+([A-Za-z_]\w*)",
+            "#DCDCAA", True
+        )
+        add_rule(
+            r"\bclass\s+([A-Za-z_]\w*)",
+            "#4EC9B0", True
+        )
+        add_rule(r"\bself\b", "#9CDCFE")
+        add_rule(
+            r"'''[\s\S]*?'''|\"\"\"[\s\S]*?\"\"\"",
+            "#CE9178"
+        )
+        add_rule(
+            r"'([^'\\]|\\.)*'|\"([^\"\\]|\\.)*\"",
+            "#CE9178"
+        )
+
+    def highlightBlock(self, text):
+        for pattern, fmt in self.rules:
+            matches = pattern.globalMatch(text)
+            while matches.hasNext():
+                match = matches.next()
+                self.setFormat(
+                    match.capturedStart(),
+                    match.capturedLength(),
+                    fmt
+                )
+
+class CodeEditor(QPlainTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.setFont(QFont("Monospace", 10))
+        self.setLineWrapMode(
+            QPlainTextEdit.LineWrapMode.NoWrap
+        )
+
+        self.highlighter = PythonHighlighter(self.document())
+
+        engine_api = [
+            "Sprite", "update", "on_collision",
+            "visible", "position", "rotation", "scale",
+            "velocity", "collider", "scene", "add_sprite",
+            "remove_sprite", "load_scene", "play_sound",
+            "set_position", "get_position", "draw",
+        ]
+
+        words = sorted(set(
+            keyword.kwlist
+            + dir(builtins)
+            + engine_api
+        ))
+
+        self.completer = QCompleter(words, self)
+        self.completer.setWidget(self)
+        self.completer.setCaseSensitivity(
+            Qt.CaseSensitivity.CaseInsensitive
+        )
+        self.completer.setFilterMode(
+            Qt.MatchFlag.MatchStartsWith
+        )
+        self.completer.setCompletionMode(
+            QCompleter.CompletionMode.PopupCompletion
+        )
+        self.completer.activated.connect(
+            self.insert_completion
+        )
+
+    def insert_completion(self, completion):
+        cursor = self.textCursor()
+        extra = len(completion) - len(
+            self.completer.completionPrefix()
+        )
+
+        if extra > 0:
+            cursor.movePosition(
+                QTextCursor.MoveOperation.Left
+            )
+            cursor.movePosition(
+                QTextCursor.MoveOperation.EndOfWord
+            )
+            cursor.insertText(completion[-extra:])
+
+        self.setTextCursor(cursor)
+
+    def keyPressEvent(self, event):
+        popup = self.completer.popup()
+
+        if popup.isVisible():
+            if event.key() in (
+                Qt.Key.Key_Enter,
+                Qt.Key.Key_Return,
+                Qt.Key.Key_Escape,
+                Qt.Key.Key_Tab,
+                Qt.Key.Key_Backtab,
+            ):
+                if event.key() in (
+                    Qt.Key.Key_Enter,
+                    Qt.Key.Key_Return,
+                    Qt.Key.Key_Tab,
+                ):
+                    self.completer.activated.emit(
+                        self.completer.currentCompletion()
+                    )
+                popup.hide()
+                return
+
+        if event.key() == Qt.Key.Key_Space and (
+            event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            self.show_completions()
+            return
+
+        super().keyPressEvent(event)
+
+        if event.text() and (
+            event.text().isalnum()
+            or event.text() in "_."
+        ):
+            self.show_completions()
+        else:
+            self.completer.popup().hide()
+
+    def show_completions(self):
+        cursor = self.textCursor()
+        cursor.select(QTextCursor.SelectionType.WordUnderCursor)
+        prefix = cursor.selectedText()
+
+        if len(prefix) < 2:
+            self.completer.popup().hide()
+            return
+
+        self.completer.setCompletionPrefix(prefix)
+        self.completer.complete()
+
 
 class Editor(QWidget):
     def __init__(self):
@@ -135,9 +310,7 @@ class Editor(QWidget):
         self.file_tree.setColumnWidth(0, 220)
         for column in range(1, 4):
             self.file_tree.hideColumn(column)
-        self.file_editor = QPlainTextEdit()
-        self.file_editor.setFont(QFont("Monospace", 10))
-        self.file_editor.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.file_editor = CodeEditor()
         self.image_preview = QLabel("Select an image to preview")
         self.image_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_preview.setMinimumSize(200, 200)
@@ -179,7 +352,7 @@ class Editor(QWidget):
         self.game_file_tree = QTreeWidget()
         self.game_file_tree.setHeaderLabel("Game Project")
         self.game_file_tree.itemClicked.connect(self.open_game_file)
-        self.game_file_editor = QPlainTextEdit()
+        self.game_file_editor = CodeEditor()
         self.game_file_editor.setFont(QFont("Monospace", 10))
         self.game_file_editor.setLineWrapMode(
             QPlainTextEdit.LineWrapMode.NoWrap
